@@ -43,19 +43,21 @@ The workflow is a [LangGraph](https://github.com/langchain-ai/langgraph) state g
 
 ## Results
 
-`eval/evaluate.py` scores the agent on 50 labelled emails in Thai, English or both. They include the messy cases real inboxes contain: Thai numerals, Buddhist Era and informal dates, +66 phone numbers, forwarded emails, and look-alike requests such as a claim status enquiry that is not a new claim. Results for the offline rule-based baseline:
+`eval/evaluate.py` scores the agent on 50 labelled emails in Thai, English or both. They include the messy cases real inboxes contain: Thai numerals, Buddhist Era and informal dates, +66 phone numbers, forwarded emails, and look-alike requests such as a claim status enquiry that is not a new claim. Gemini (free tier) against the offline rule-based baseline:
 
-| Metric | Rule-based baseline |
-| --- | --- |
-| Request type | 39/50 (78%) |
-| Routing decision | 40/50 (80%) |
-| Policy number | 49/50 (98%) |
-| Licence plate | 50/50 (100%) |
-| Key date | 35/46 (76%) |
-| Contact phone | 47/50 (94%) |
-| Insured name | 19/20 (95%) |
+| Metric | Rule-based baseline | Gemini 3.5 Flash-Lite |
+| --- | --- | --- |
+| Request type | 39/50 (78%) | 50/50 (100%) |
+| Routing decision | 40/50 (80%) | 50/50 (100%) |
+| Policy number | 49/50 (98%) | 50/50 (100%) |
+| Licence plate | 50/50 (100%) | 50/50 (100%) |
+| Key date | 35/46 (76%) | 46/46 (100%) |
+| Contact phone | 47/50 (94%) | 50/50 (100%) |
+| Insured name | 19/20 (95%) | 20/20 (100%) |
 
-The baseline copes with tidy, labelled emails but misses informal wording ("ขอแก้ที่อยู่", "replace the vehicle"), Thai month names ("20 ต.ค. 2569") and international phone formats. With a Gemini key set, `python eval/evaluate.py` runs both side by side and writes every mistake to [`eval/results.md`](eval/results.md).
+The baseline misses informal wording ("ขอแก้ที่อยู่", "replace the vehicle"), Thai month names ("20 ต.ค. 2569") and international phone formats, and mistakes a claim status enquiry for a new claim. Gemini handled all 50 emails correctly. Every mistake is listed in [`eval/results.md`](eval/results.md); run `python eval/evaluate.py` with a Gemini key to reproduce it.
+
+**Caveat:** these 50 emails are synthetic and were written alongside the prompt, so a perfect score here does not mean the agent is perfect on real inboxes. The next step is a blind test set of real, anonymised broker emails.
 
 ## Quick start
 
