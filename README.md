@@ -43,19 +43,19 @@ The workflow is a [LangGraph](https://github.com/langchain-ai/langgraph) state g
 
 ## Results
 
-`eval/evaluate.py` scores the agent against 13 labelled sample emails (8 Thai, 5 English). These are the results for the offline rule-based baseline, which runs without an API key:
+`eval/evaluate.py` scores the agent on 50 labelled emails in Thai, English or both. They include the messy cases real inboxes contain: Thai numerals, Buddhist Era and informal dates, +66 phone numbers, forwarded emails, and look-alike requests such as a claim status enquiry that is not a new claim. Results for the offline rule-based baseline:
 
 | Metric | Rule-based baseline |
 | --- | --- |
-| Request type | 13/13 (100%) |
-| Routing decision | 12/13 (92%) |
-| Policy number | 13/13 (100%) |
-| Licence plate | 13/13 (100%) |
-| Key date | 12/13 (92%) |
-| Contact phone | 13/13 (100%) |
-| Insured name | 6/6 (100%) |
+| Request type | 39/50 (78%) |
+| Routing decision | 40/50 (80%) |
+| Policy number | 49/50 (98%) |
+| Licence plate | 50/50 (100%) |
+| Key date | 35/46 (76%) |
+| Contact phone | 47/50 (94%) |
+| Insured name | 19/20 (95%) |
 
-The baseline misses sample 13, where the date is written informally as "15 ต.ค. 69". Regular expressions cannot read it, so a clean request is wrongly sent for review. Messy, real-world wording like this is exactly what the LLM handles; run the evaluation with your own API key to compare the two.
+The baseline copes with tidy, labelled emails but misses informal wording ("ขอแก้ที่อยู่", "replace the vehicle"), Thai month names ("20 ต.ค. 2569") and international phone formats. With a Gemini key set, `python eval/evaluate.py` runs both side by side and writes every mistake to [`eval/results.md`](eval/results.md).
 
 ## Quick start
 

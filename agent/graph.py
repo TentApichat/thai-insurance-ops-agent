@@ -7,7 +7,7 @@ from typing import Optional, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
-from .llm import Extractor, get_extractor
+from .llm import Extractor, clean_extraction, get_extractor
 from .schema import Extraction, RequestType
 from .store import RequestStore
 from .validators import TEAMS, validate
@@ -27,14 +27,16 @@ def build_graph(extractor: Optional[Extractor] = None, store: Optional[RequestSt
     extractor = extractor or get_extractor()
     store = store or RequestStore()
 
+    def today_of(state: TriageState) -> date:
+        return date.fromisoformat(state["today"]) if state.get("today") else date.today()
+
     def extract_node(state: TriageState) -> TriageState:
-        extraction = extractor.extract(state["text"])
+        extraction = clean_extraction(extractor.extract(state["text"], today_of(state)))
         return {"extraction": extraction.model_dump(mode="json")}
 
     def validate_node(state: TriageState) -> TriageState:
         extraction = Extraction.model_validate(state["extraction"])
-        today = date.fromisoformat(state["today"]) if state.get("today") else date.today()
-        return {"issues": validate(extraction, state["text"], today)}
+        return {"issues": validate(extraction, state["text"], today_of(state))}
 
     def choose_route(state: TriageState) -> str:
         return "human_review" if state["issues"] else "auto_route"

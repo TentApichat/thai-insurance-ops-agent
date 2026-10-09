@@ -1,9 +1,11 @@
 from datetime import date
+from types import SimpleNamespace
 
 import pytest
 
+from agent import llm
 from agent.graph import build_graph
-from agent.llm import RuleBasedExtractor, find_first_date, normalise_plate
+from agent.llm import GeminiExtractor, RuleBasedExtractor, clean_extraction, find_first_date, normalise_plate
 from agent.schema import Extraction, RequestType
 from agent.store import RequestStore
 from agent.validators import validate
@@ -39,12 +41,56 @@ def test_plate_is_normalised():
 
 def test_rule_based_extraction_reads_thai_claim():
     text = "แจ้งเคลม กรมธรรม์ MTR-2026-002210 รถทะเบียน 1กข 1234 ถูกชน เมื่อวันที่ 08/10/2569 โทร 062-345-6789"
-    result = RuleBasedExtractor().extract(text)
+    result = clean_extraction(RuleBasedExtractor().extract(text))
     assert result.request_type == RequestType.CLAIM
     assert result.policy_number == "MTR-2026-002210"
     assert result.plate_number == "1กข 1234"
     assert result.key_date == "2026-10-08"
     assert result.contact_phone == "0623456789"
+
+
+def test_clean_up_handles_international_phone_and_thai_digits():
+    raw = make(contact_phone="+66 81 555 0909", plate_number="๑ขค๒๓๔๕", key_date=" 2026-10-15 ")
+    cleaned = clean_extraction(raw)
+    assert cleaned.contact_phone == "0815550909"
+    assert cleaned.plate_number == "1ขค 2345"
+    assert cleaned.key_date == "2026-10-15"
+
+
+# --- Gemini extractor, with the network call replaced by a fake ------------
+
+class FakeModels:
+    def __init__(self, failures: int = 0):
+        self.failures = failures
+        self.calls = []
+
+    def generate_content(self, model, contents, config):
+        self.calls.append(contents)
+        if self.failures:
+            self.failures -= 1
+            raise RuntimeError("429 RESOURCE_EXHAUSTED: slow down")
+        return SimpleNamespace(parsed=make(confidence=1.4), text="")
+
+
+def fake_gemini(monkeypatch, failures: int = 0) -> tuple[GeminiExtractor, FakeModels]:
+    monkeypatch.setattr(llm.time, "sleep", lambda seconds: None)
+    extractor = GeminiExtractor(api_key="test-key", model="test-model")
+    models = FakeModels(failures)
+    extractor.client = SimpleNamespace(models=models)
+    return extractor, models
+
+
+def test_gemini_prompt_includes_todays_date(monkeypatch):
+    extractor, models = fake_gemini(monkeypatch)
+    result = extractor.extract("please endorse", today=TODAY)
+    assert "Today's date: 2026-10-10" in models.calls[0]
+    assert result.confidence == 1.0  # clamped to the 0 to 1 range
+
+
+def test_gemini_retries_after_rate_limit(monkeypatch):
+    extractor, models = fake_gemini(monkeypatch, failures=2)
+    assert extractor.extract("please endorse", today=TODAY).request_type == RequestType.ENDORSEMENT
+    assert len(models.calls) == 3
 
 
 # --- business rules --------------------------------------------------------

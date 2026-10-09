@@ -1,27 +1,42 @@
-"""Score the agent on the labelled sample requests.
+"""Score the agent on the labelled sample emails and compare extractors.
 
 Usage:
-    python eval/evaluate.py                 # offline rule-based baseline
-    GEMINI_API_KEY=... python eval/evaluate.py   # the LLM
+    python eval/evaluate.py                        # rule-based baseline (and Gemini too if a key is set)
+    python eval/evaluate.py --extractor gemini     # only Gemini
+    python eval/evaluate.py --extractor rules      # only the offline baseline
+
+Results are printed and saved to eval/results.md.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from agent.graph import build_graph  # noqa: E402
-from agent.llm import get_extractor  # noqa: E402
+from agent.llm import GeminiExtractor, RuleBasedExtractor, get_extractor  # noqa: E402
 from agent.store import RequestStore  # noqa: E402
 
 FIELDS = ["policy_number", "plate_number", "key_date", "contact_phone", "insured_name"]
+METRICS = ["request_type", "route"] + FIELDS
+LABELS = {
+    "request_type": "Request type",
+    "route": "Routing decision",
+    "policy_number": "Policy number",
+    "plate_number": "Licence plate",
+    "key_date": "Key date",
+    "contact_phone": "Contact phone",
+    "insured_name": "Insured name",
+}
 
 
 def normalise(field: str, value):
@@ -35,59 +50,102 @@ def normalise(field: str, value):
     return value
 
 
+def evaluate(extractor, samples: list[dict], today: str, delay: float) -> dict:
+    hits = {metric: 0 for metric in METRICS}
+    totals = {metric: 0 for metric in METRICS}
+    mistakes: list[str] = []
+    errors = 0
+
+    with tempfile.TemporaryDirectory() as tmp:
+        graph = build_graph(extractor, RequestStore(str(Path(tmp) / "eval.db")))
+        for number, sample in enumerate(samples, start=1):
+            expected = sample["expected"]
+            try:
+                result = graph.invoke({"text": sample["text"], "today": today})
+            except Exception as error:  # one failed call should not stop the whole evaluation
+                errors += 1
+                result = None
+                mistakes.append(f"#{sample['id']} error: {str(error)[:150]}")
+
+            got = result["extraction"] if result else {}
+            predicted = {"request_type": got.get("request_type"), "route": result["route"] if result else None}
+            predicted.update({field: got.get(field) for field in FIELDS})
+
+            for metric in METRICS:
+                if metric not in expected:
+                    continue
+                totals[metric] += 1
+                if normalise(metric, predicted[metric]) == normalise(metric, expected[metric]):
+                    hits[metric] += 1
+                elif result:
+                    detail = f" {result['issues']}" if metric == "route" else ""
+                    mistakes.append(
+                        f"#{sample['id']} {metric}: expected {expected[metric]!r}, got {predicted[metric]!r}{detail}"
+                    )
+
+            if isinstance(extractor, GeminiExtractor):
+                print(f"  {extractor.name}: {number}/{len(samples)}", end="\r", flush=True)
+                time.sleep(delay)  # stay inside the free tier's requests-per-minute limit
+
+    return {"name": extractor.name, "hits": hits, "totals": totals, "mistakes": mistakes, "errors": errors}
+
+
+def score(run: dict, metric: str) -> str:
+    total = run["totals"][metric]
+    return f"{run['hits'][metric]}/{total} ({run['hits'][metric] / total:.0%})" if total else "n/a"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--data", default=str(ROOT / "data" / "sample_requests.jsonl"))
     parser.add_argument("--today", default="2026-10-10", help="Fixed date so results are reproducible")
+    parser.add_argument("--extractor", choices=["auto", "rules", "gemini"], default="auto")
+    parser.add_argument("--delay", type=float, default=4.0, help="Seconds between Gemini calls")
+    parser.add_argument("--out", default=str(ROOT / "eval" / "results.md"))
     args = parser.parse_args()
 
     samples = [json.loads(line) for line in Path(args.data).read_text(encoding="utf-8").splitlines() if line.strip()]
-    extractor = get_extractor()
-    with tempfile.TemporaryDirectory() as tmp:
-        graph = build_graph(extractor, RequestStore(str(Path(tmp) / "eval.db")))
 
-        type_hits = route_hits = 0
-        field_hits = {field: 0 for field in FIELDS}
-        field_totals = {field: 0 for field in FIELDS}
-        mistakes = []
+    extractors = []
+    if args.extractor in ("auto", "rules"):
+        extractors.append(RuleBasedExtractor())
+    if args.extractor in ("auto", "gemini"):
+        llm = get_extractor()
+        if isinstance(llm, GeminiExtractor):
+            extractors.append(llm)
+        elif args.extractor == "gemini":
+            sys.exit("No GEMINI_API_KEY found. Set it first, for example: export GEMINI_API_KEY=your-key")
 
-        for sample in samples:
-            result = graph.invoke({"text": sample["text"], "today": args.today})
-            expected, got = sample["expected"], result["extraction"]
+    runs = []
+    for extractor in extractors:
+        print(f"Evaluating {extractor.name} on {len(samples)} emails...")
+        runs.append(evaluate(extractor, samples, args.today, args.delay))
+    print()
 
-            if got["request_type"] == expected["request_type"]:
-                type_hits += 1
-            else:
-                mistakes.append(f"#{sample['id']} type: expected {expected['request_type']}, got {got['request_type']}")
+    header = "| Metric | " + " | ".join(run["name"] for run in runs) + " |"
+    divider = "| --- | " + " | ".join("---" for _ in runs) + " |"
+    rows = [f"| {LABELS[m]} | " + " | ".join(score(run, m) for run in runs) + " |" for m in METRICS]
+    table = "\n".join([header, divider, *rows])
+    print(table)
 
-            if result["route"] == expected["route"]:
-                route_hits += 1
-            else:
-                mistakes.append(f"#{sample['id']} route: expected {expected['route']}, got {result['route']} {result['issues']}")
-
-            for field in FIELDS:
-                if field not in expected:
-                    continue
-                field_totals[field] += 1
-                if normalise(field, got.get(field)) == normalise(field, expected[field]):
-                    field_hits[field] += 1
-                else:
-                    mistakes.append(f"#{sample['id']} {field}: expected {expected[field]!r}, got {got.get(field)!r}")
-
-    n = len(samples)
-    reviewed = sum(1 for s in samples if s["expected"]["route"] == "human_review")
-    print(f"Extractor: {extractor.name}   Samples: {n}   Expected human reviews: {reviewed}\n")
-    print(f"{'Metric':<22}{'Score':>10}")
-    print(f"{'Request type':<22}{type_hits:>4}/{n:<3} {type_hits / n:>4.0%}")
-    print(f"{'Routing decision':<22}{route_hits:>4}/{n:<3} {route_hits / n:>4.0%}")
-    for field in FIELDS:
-        total = field_totals[field]
-        if total:
-            print(f"{field:<22}{field_hits[field]:>4}/{total:<3} {field_hits[field] / total:>4.0%}")
-    if mistakes:
-        print("\nMistakes:")
-        for mistake in mistakes:
-            print(f"  {mistake}")
+    report = [
+        "# Evaluation results",
+        "",
+        f"{len(samples)} labelled emails, evaluation date {args.today}.",
+        "",
+        table,
+        "",
+    ]
+    for run in runs:
+        report.append(f"## Mistakes: {run['name']} ({len(run['mistakes'])}, errors: {run['errors']})")
+        report.append("")
+        if run["mistakes"]:
+            report.extend(f"- {mistake}" for mistake in run["mistakes"])
+        else:
+            report.append("None.")
+        report.append("")
+    Path(args.out).write_text("\n".join(report), encoding="utf-8")
+    print(f"\nFull results saved to {os.path.relpath(args.out)}")
 
 
 if __name__ == "__main__":
